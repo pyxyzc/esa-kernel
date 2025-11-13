@@ -33,8 +33,8 @@ __global__ void retrieval_kernel(const float *__restrict__ Q, const float *__res
     }
 }
 
-#define tile 16 // the number of elements each thread processes
-__global__ void retrieval_kernel_2(float *__restrict__ Q, float *__restrict__ K, float *__restrict__ score, const int *__restrict__ block_table, const int *__restrict__ batch_index, int dim, int B, int S){
+#define tile 8
+__global__ void retrieval_kernel_2(const float *__restrict__ Q, const float *__restrict__ K, float *__restrict__ score, const int *__restrict__ block_table, const int *__restrict__ batch_index, int dim, int B, int S){
     // Q: [batch, dim], the query tensors
     // K: [N, dim], the key tensors
     // score: [S], the result score values
@@ -48,21 +48,25 @@ __global__ void retrieval_kernel_2(float *__restrict__ Q, float *__restrict__ K,
     int global_x = blockIdx.x;
     if (global_x < S){
         int local_x = threadIdx.x;
-        float *k = K + block_table[global_x] * dim + local_x * tile;
-        float *q = Q + batch_index[global_x] * dim + local_x * tile;
-
-        int num_repeats = tile / 4;
-        for(int i = 0; i < num_repeats; ++i){
-            float4 q4 = *reinterpret_cast<float4*>(&q[i * 4]);
-            float4 k4 = *reinterpret_cast<float4*>(&k[i * 4]);
+        const float *k = K + block_table[global_x] * dim;
+        const float *q = Q + batch_index[global_x] * dim;
+        int tile_offset = local_x * tile;
+        for(int i = 0; i < tile; ++i){
+            if(i + tile_offset < dim){
+                query[i + tile_offset] = q[i + tile_offset];
+                feature[i + tile_offset] = k[i + tile_offset];
+            }
         }
-
         __syncthreads();
         float sum = 0.0f;
         for(int i = 0; i < tile; ++i){
-            sum += feature[tile * local_x + i] * query[tile * local_x + i];
+            if(tile_offset + i < dim){
+                sum += feature[tile_offset + i] * query[tile_offset + i];
+            }
         }
         part_score[local_x] = sum;
+        __syncthreads();
+
         for(int i = blockDim.x / 2; i; i /= 2){
             if(local_x < i){
                 part_score[local_x] += part_score[local_x + i];
@@ -211,9 +215,9 @@ int main(){
     for(int i = 0; i < total_kv_len; ++i){
         float diff = fabs(h_score[i] - h_score_gpu[i]);
         avg_error += diff;
-        // if(diff > eps){
-        //     printf("not ok!!! %f vs %f\n", h_score[i], h_score_gpu[i]);
-        // }
+        if(diff > eps){
+            printf("not ok @%d!!! %f vs %f, err %f\n", i, h_score[i], h_score_gpu[i], diff);
+        }
     }
     avg_error = avg_error / total_kv_len;
     printf("avg error: %f\n", avg_error);
