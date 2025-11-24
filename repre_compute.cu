@@ -11,7 +11,7 @@
 } \
 
 
-__global__ void extract_repre(const float *key_cache, float *repre_cache, const int *block_table, int block_size, int dim) {
+__global__ void extract_repre(const float *key_cache, float *repre_cache, const int *block_table, const int *block_table_2, int block_size, int dim) {
     // key_cache: [N, block_size, dim]
     // repre_cache: [N, 1, dim]
     // block_table: [S]
@@ -23,8 +23,9 @@ __global__ void extract_repre(const float *key_cache, float *repre_cache, const 
 
     int idx = blockIdx.x;
     int block_id = block_table[idx];
+    int block_id_2 = block_table_2[idx];
     const float* key_ptr = key_cache + block_id * block_size * dim;
-    float* repre_ptr = repre_cache + block_id * dim;
+    float* repre_ptr = repre_cache + block_id_2 * dim;
     int d = threadIdx.x;
     if (d < dim) {
         float sum = 0.0f;
@@ -99,7 +100,10 @@ int main(){
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
     cudaEventRecord(start, 0);
-    extract_repre<<<blocks, threads>>>(d_key_cache, d_repre, d_block_table, block_size, dim);
+    int *d_block_table_2;
+    cuda_check(cudaMalloc(&d_block_table_2, block_number * sizeof(int)));
+    // Assuming you have initialized d_block_table_2 somewhere here
+    extract_repre<<<blocks, threads>>>(d_key_cache, d_repre, d_block_table, d_block_table_2, block_size, dim);
     cudaEventRecord(stop, 0);
     cuda_check(cudaPeekAtLastError());
     cuda_check(cudaEventSynchronize(stop));
