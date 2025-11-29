@@ -35,7 +35,11 @@ repre_cache = torch.randn(N, dim, dtype = torch.float32).cuda()
 repre_table = torch.arange(0, s, dtype = torch.int32).cuda()
 q_table = torch.arange(0, s, dtype = torch.int32).cuda()
 score = torch.zeros(s, dtype = torch.float32).cuda()
+start = time.time()
 cuda_retrieval(query_list, repre_cache, q_table, repre_table, score)
+torch.cuda.synchronize()
+elapsed_cuda = time.time() - start
+print(f"cuda_retrieval time: {elapsed_cuda:.6f} s")
 print("score: ", score)
 
 
@@ -44,8 +48,11 @@ def naive_retrieval():
     score_gt = (query[q_table] * repre_cache[repre_table]).sum(-1)
     return score_gt
 
+start = time.time()
 score_gt = naive_retrieval()
-
+torch.cuda.synchronize()
+elapsed_naive = time.time() - start
+print(f"naive_retrieval time: {elapsed_naive:.6f} s")
 print("score_gt: ", score_gt)
 
 diff = (score - score_gt).abs()
