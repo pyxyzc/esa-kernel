@@ -4,6 +4,7 @@
 #include <random>
 
 #include <torch/extension.h>
+#include <vector>
 #include <torch/types.h>
 
 #define cuda_check(call){ \
@@ -148,7 +149,7 @@ if (((T).options().dtype() != (expect_type))) { \
     throw std::runtime_error("mismatched tensor dtype"); \
 }
 
-void cuda_retrieval(torch::List<torch::Tensor> query_list, torch::Tensor repre_cache, torch::Tensor q_index, torch::Tensor repre_index, torch::Tensor score){
+void cuda_retrieval(const std::vector<torch::Tensor> &query_list, torch::Tensor repre_cache, torch::Tensor q_index, torch::Tensor repre_index, torch::Tensor score){
     // query: a list of ptr
     // repre_cache: a ptr
     // concatenate list of query tensors along batch dim
