@@ -3,6 +3,12 @@
 #include <chrono>
 #include <random>
 
+#include <pybind11/numpy.h>
+#include <pybind11/pybind11.h>
+
+using Ptr = uintptr_t;
+using PtrArray = py::array_t<uintptr_t>;
+
 #define cuda_check(call){ \
     cudaError_t err = call; \
     if(err != cudaSuccess){ \
@@ -10,7 +16,7 @@
     } \
 } \
 
-
+// TODO: change Q from float* to float**
 __global__ void retrieval_kernel(const float *__restrict__ Q, const float *__restrict__ K, float *__restrict__ score, const int *__restrict__ block_table, const int *__restrict__ batch_index, int dim, int B, int S){
     // Q: [batch, dim], the query tensors
     // K: [N, dim], the key tensors
@@ -135,135 +141,140 @@ void init_mat(float *mat, int sz){
 
 }
 
-int main(){
-    float *h_Q, *h_K;
-    int B ;
-    int seq_len;
-    int dim;
-    scanf("%d%d%d", &B, &seq_len, &dim);
-
-
-    int N = 4000;
-    h_Q = (float*)malloc(B * dim * sizeof(float));
-    h_K = (float*)malloc(N * dim * sizeof(float));
-
-    init_mat(h_Q, B * dim);
-    init_mat(h_K, N * dim);
-
-    int total_kv_len = 0;
-    int *h_kv_len;
-    h_kv_len = (int*)malloc(B * sizeof(int));
-    int *kv_start_offsets ;
-    kv_start_offsets = (int*)malloc((B+1) * sizeof(int));
-    int kv_len_each = (seq_len / 128);
-    for(int i = 0; i < B; ++i){
-        h_kv_len[i] = kv_len_each;
-        kv_start_offsets[i] = total_kv_len;
-        total_kv_len += h_kv_len[i];
-    }
-    kv_start_offsets[B] = total_kv_len;
-    float *h_score;
-    h_score = (float*)malloc(total_kv_len * sizeof(float));
-
-    int *block_table;
-    block_table = (int*)malloc(total_kv_len * sizeof(int));
-    for(int i = 0; i < total_kv_len; ++i){
-        block_table[i] = i * 5 % N;
-    }
-    int *batch_index;
-    batch_index = (int*)malloc(total_kv_len * sizeof(int));
-
-    for(int i = 0, j = 0; i < total_kv_len; ++i){
-        if(i < kv_start_offsets[j+1] && i >= kv_start_offsets[j]){
-            batch_index[i] = j;
-        }
-        else{
-            ++j;
-            batch_index[i] = j;
-        }
-    }
-
-
-    float *d_Q, *d_K, *d_score;
-    cuda_check(cudaMalloc(&d_Q, sizeof(float) * B * dim));
-    cuda_check(cudaMalloc(&d_K, sizeof(float) * N * dim));
-    cuda_check(cudaMalloc(&d_score, sizeof(float) * total_kv_len));
-    cuda_check(cudaMemcpy(d_Q, h_Q, sizeof(float) * B * dim, cudaMemcpyHostToDevice));
-    cuda_check(cudaMemcpy(d_K, h_K, sizeof(float) * N * dim, cudaMemcpyHostToDevice));
-
-    int *d_block_table, *d_batch_index;
-    cuda_check(cudaMalloc(&d_block_table, sizeof(int) * total_kv_len));
-    cuda_check(cudaMemcpy(d_block_table, block_table, sizeof(int) * total_kv_len, cudaMemcpyHostToDevice));
-    cuda_check(cudaMalloc(&d_batch_index, sizeof(int) * total_kv_len));
-    cuda_check(cudaMemcpy(d_batch_index, batch_index, sizeof(int) * total_kv_len, cudaMemcpyHostToDevice));
-
-
-    dim3 numThreads = {(unsigned int)(32)};
-    dim3 numBlocks = {(unsigned int)total_kv_len};
-
-    for (int i = 0; i < 10; ++i){
-        retrieval_kernel<<<numBlocks, numThreads>>>(d_Q, d_K, d_score, d_block_table, d_batch_index, dim, B, total_kv_len);
-        // size_t bytes = 2 * dim * sizeof(float) + numThreads.x * sizeof(float);
-        // retrieval_kernel_2<<<numBlocks, numThreads, bytes>>>(d_Q, d_K, d_score, d_block_table, d_batch_index, dim, B, total_kv_len);
-        size_t bytes = numThreads.x * sizeof(float);
-        retrieval_kernel_3<<<numBlocks, numThreads, bytes>>>(d_Q, d_K, d_score, d_block_table, d_batch_index, dim, B, total_kv_len);
-    }
-
-    cudaEvent_t start, stop, start_2, stop_2;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventCreate(&start_2);
-    cudaEventCreate(&stop_2);
-
-
-    cudaEventRecord(start, 0);
-    retrieval_kernel<<<numBlocks, numThreads>>>(d_Q, d_K, d_score, d_block_table, d_batch_index, dim, B, total_kv_len);
-    cudaEventRecord(stop, 0);
-    cuda_check(cudaPeekAtLastError());
-    cuda_check(cudaEventSynchronize(stop));
-    float milliseconds = 0;
-    cudaEventElapsedTime(&milliseconds, start, stop);
-    printf("Time spent on retrieval_kernel: %f ms\n", milliseconds);
-
-
-    cudaEventRecord(start_2, 0);
-    // size_t bytes = 2 * dim * sizeof(float) + numThreads.x * sizeof(float);
-    // retrieval_kernel_2<<<numBlocks, numThreads, bytes>>>(d_Q, d_K, d_score, d_block_table, d_batch_index, dim, B, total_kv_len);
-    size_t bytes = numThreads.x * sizeof(float);
-    retrieval_kernel_3<<<numBlocks, numThreads, bytes>>>(d_Q, d_K, d_score, d_block_table, d_batch_index, dim, B, total_kv_len);
-    cudaEventRecord(stop_2, 0);
-    cuda_check(cudaPeekAtLastError());
-    cuda_check(cudaEventSynchronize(stop_2));
-    float milliseconds_2 = 0;
-    cudaEventElapsedTime(&milliseconds_2, start_2, stop_2);
-    printf("Time spent on retrieval_kernel_3: %f ms\n", milliseconds_2);
-
-
-    float *h_score_gpu;
-    h_score_gpu = (float*)malloc(total_kv_len * sizeof(float));
-    cuda_check(cudaMemcpy(h_score_gpu, d_score, total_kv_len * sizeof(float), cudaMemcpyDeviceToHost));
-
-    for (int i = 0; i < 10; ++i){
-        retrieval_host(h_Q, h_K, h_score, block_table, batch_index, dim, B, total_kv_len);
-    }
-
-    auto h_start = std::chrono::high_resolution_clock::now();
-    retrieval_host(h_Q, h_K, h_score, block_table, batch_index, dim, B, total_kv_len);
-    auto h_stop = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(h_stop - h_start);
-    printf("Time spent on retrieval_host: %ld ms\n", duration.count() / 1000000);
-
-    float eps = 1e-3;
-    float avg_error = 0.0f;
-    for(int i = 0; i < total_kv_len; ++i){
-        float diff = fabs(h_score[i] - h_score_gpu[i]);
-        avg_error += diff;
-        if(diff > eps){
-            printf("not ok @%d!!! %f vs %f, err %f\n", i, h_score[i], h_score_gpu[i], diff);
-        }
-    }
-    avg_error = avg_error / total_kv_len;
-    printf("avg error: %f\n", avg_error);
-
-    return 0;
+cudaError_t cuda_retrieval(py::object query, py::object repre_cache, py::object q_table, py::object repre_block_table){
+    // query: a list of ptr
+    // repre_cache: a ptr
 }
+
+// int main(){
+//     float *h_Q, *h_K;
+//     int B ;
+//     int seq_len;
+//     int dim;
+//     scanf("%d%d%d", &B, &seq_len, &dim);
+//
+//
+//     int N = 4000;
+//     h_Q = (float*)malloc(B * dim * sizeof(float));
+//     h_K = (float*)malloc(N * dim * sizeof(float));
+//
+//     init_mat(h_Q, B * dim);
+//     init_mat(h_K, N * dim);
+//
+//     int total_kv_len = 0;
+//     int *h_kv_len;
+//     h_kv_len = (int*)malloc(B * sizeof(int));
+//     int *kv_start_offsets ;
+//     kv_start_offsets = (int*)malloc((B+1) * sizeof(int));
+//     int kv_len_each = (seq_len / 128);
+//     for(int i = 0; i < B; ++i){
+//         h_kv_len[i] = kv_len_each;
+//         kv_start_offsets[i] = total_kv_len;
+//         total_kv_len += h_kv_len[i];
+//     }
+//     kv_start_offsets[B] = total_kv_len;
+//     float *h_score;
+//     h_score = (float*)malloc(total_kv_len * sizeof(float));
+//
+//     int *block_table;
+//     block_table = (int*)malloc(total_kv_len * sizeof(int));
+//     for(int i = 0; i < total_kv_len; ++i){
+//         block_table[i] = i * 5 % N;
+//     }
+//     int *batch_index;
+//     batch_index = (int*)malloc(total_kv_len * sizeof(int));
+//
+//     for(int i = 0, j = 0; i < total_kv_len; ++i){
+//         if(i < kv_start_offsets[j+1] && i >= kv_start_offsets[j]){
+//             batch_index[i] = j;
+//         }
+//         else{
+//             ++j;
+//             batch_index[i] = j;
+//         }
+//     }
+//
+//
+//     float *d_Q, *d_K, *d_score;
+//     cuda_check(cudaMalloc(&d_Q, sizeof(float) * B * dim));
+//     cuda_check(cudaMalloc(&d_K, sizeof(float) * N * dim));
+//     cuda_check(cudaMalloc(&d_score, sizeof(float) * total_kv_len));
+//     cuda_check(cudaMemcpy(d_Q, h_Q, sizeof(float) * B * dim, cudaMemcpyHostToDevice));
+//     cuda_check(cudaMemcpy(d_K, h_K, sizeof(float) * N * dim, cudaMemcpyHostToDevice));
+//
+//     int *d_block_table, *d_batch_index;
+//     cuda_check(cudaMalloc(&d_block_table, sizeof(int) * total_kv_len));
+//     cuda_check(cudaMemcpy(d_block_table, block_table, sizeof(int) * total_kv_len, cudaMemcpyHostToDevice));
+//     cuda_check(cudaMalloc(&d_batch_index, sizeof(int) * total_kv_len));
+//     cuda_check(cudaMemcpy(d_batch_index, batch_index, sizeof(int) * total_kv_len, cudaMemcpyHostToDevice));
+//
+//
+//     dim3 numThreads = {(unsigned int)(32)};
+//     dim3 numBlocks = {(unsigned int)total_kv_len};
+//
+//     for (int i = 0; i < 10; ++i){
+//         retrieval_kernel<<<numBlocks, numThreads>>>(d_Q, d_K, d_score, d_block_table, d_batch_index, dim, B, total_kv_len);
+//         // size_t bytes = 2 * dim * sizeof(float) + numThreads.x * sizeof(float);
+//         // retrieval_kernel_2<<<numBlocks, numThreads, bytes>>>(d_Q, d_K, d_score, d_block_table, d_batch_index, dim, B, total_kv_len);
+//         size_t bytes = numThreads.x * sizeof(float);
+//         retrieval_kernel_3<<<numBlocks, numThreads, bytes>>>(d_Q, d_K, d_score, d_block_table, d_batch_index, dim, B, total_kv_len);
+//     }
+//
+//     cudaEvent_t start, stop, start_2, stop_2;
+//     cudaEventCreate(&start);
+//     cudaEventCreate(&stop);
+//     cudaEventCreate(&start_2);
+//     cudaEventCreate(&stop_2);
+//
+//
+//     cudaEventRecord(start, 0);
+//     retrieval_kernel<<<numBlocks, numThreads>>>(d_Q, d_K, d_score, d_block_table, d_batch_index, dim, B, total_kv_len);
+//     cudaEventRecord(stop, 0);
+//     cuda_check(cudaPeekAtLastError());
+//     cuda_check(cudaEventSynchronize(stop));
+//     float milliseconds = 0;
+//     cudaEventElapsedTime(&milliseconds, start, stop);
+//     printf("Time spent on retrieval_kernel: %f ms\n", milliseconds);
+//
+//
+//     cudaEventRecord(start_2, 0);
+//     // size_t bytes = 2 * dim * sizeof(float) + numThreads.x * sizeof(float);
+//     // retrieval_kernel_2<<<numBlocks, numThreads, bytes>>>(d_Q, d_K, d_score, d_block_table, d_batch_index, dim, B, total_kv_len);
+//     size_t bytes = numThreads.x * sizeof(float);
+//     retrieval_kernel_3<<<numBlocks, numThreads, bytes>>>(d_Q, d_K, d_score, d_block_table, d_batch_index, dim, B, total_kv_len);
+//     cudaEventRecord(stop_2, 0);
+//     cuda_check(cudaPeekAtLastError());
+//     cuda_check(cudaEventSynchronize(stop_2));
+//     float milliseconds_2 = 0;
+//     cudaEventElapsedTime(&milliseconds_2, start_2, stop_2);
+//     printf("Time spent on retrieval_kernel_3: %f ms\n", milliseconds_2);
+//
+//
+//     float *h_score_gpu;
+//     h_score_gpu = (float*)malloc(total_kv_len * sizeof(float));
+//     cuda_check(cudaMemcpy(h_score_gpu, d_score, total_kv_len * sizeof(float), cudaMemcpyDeviceToHost));
+//
+//     for (int i = 0; i < 10; ++i){
+//         retrieval_host(h_Q, h_K, h_score, block_table, batch_index, dim, B, total_kv_len);
+//     }
+//
+//     auto h_start = std::chrono::high_resolution_clock::now();
+//     retrieval_host(h_Q, h_K, h_score, block_table, batch_index, dim, B, total_kv_len);
+//     auto h_stop = std::chrono::high_resolution_clock::now();
+//     auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(h_stop - h_start);
+//     printf("Time spent on retrieval_host: %ld ms\n", duration.count() / 1000000);
+//
+//     float eps = 1e-3;
+//     float avg_error = 0.0f;
+//     for(int i = 0; i < total_kv_len; ++i){
+//         float diff = fabs(h_score[i] - h_score_gpu[i]);
+//         avg_error += diff;
+//         if(diff > eps){
+//             printf("not ok @%d!!! %f vs %f, err %f\n", i, h_score[i], h_score_gpu[i], diff);
+//         }
+//     }
+//     avg_error = avg_error / total_kv_len;
+//     printf("avg error: %f\n", avg_error);
+//
+//     return 0;
+// }
