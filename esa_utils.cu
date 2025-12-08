@@ -1,0 +1,152 @@
+#include <cuda_runtime.h>
+#include <cub/cub.cuh>
+#include <stdio.h>
+#include <chrono>
+#include <random>
+
+#include <torch/extension.h>
+#include <vector>
+#include <torch/types.h>
+
+#define STRINGFY(func) #func
+#define TORCH_BINDING_COMMON_EXTENSION(func) \
+    m.def(STRINGFY(func), &func, STRINGFY(func));
+#define CHECK_TORCH_TENSOR_DTYPE(T, expect_type) \
+    if (((T).options().dtype() != (expect_type))) { \
+        std::cout << "Got input tensor: " << (T).options() << std::endl; \
+        std::cout <<"But the kernel should accept tensor with " << (expect_type) << " dtype" << std::endl; \
+        throw std::runtime_error("mismatched tensor dtype"); \
+    }
+#define cuda_check(call){ \
+    cudaError_t err = call; \
+    if(err != cudaSuccess){ \
+        fprintf(stderr, "cuda_error %s %d %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+    } \
+} \
+
+__global__ void extract_repre(const float *key_cache, float *repre_cache, const int *block_table, const int *block_table_2, int block_size, int dim) {
+    // key_cache: [N, block_size, dim]
+    // repre_cache: [N, 1, dim]
+    // block_table: [S]
+    // repre_cache[block_table[i]] = mean(key_cache[block_table[i]], 0)
+    // NOTE: The last `dimtension` can be processed parallelly. But the
+    // `block_size` dim is correlated with each other.
+    // So blocks (threads) are tiled for blocks (key_cache)
+    // And threads in a block handles different dim
+
+    int idx = blockIdx.x;
+    int block_id = block_table[idx];
+    int block_id_2 = block_table_2[idx];
+    const float* key_ptr = key_cache + block_id * block_size * dim;
+    float* repre_ptr = repre_cache + block_id_2 * dim;
+    int d = threadIdx.x;
+    if (d < dim) {
+        float sum = 0.0f;
+        for (int j = 0; j < block_size; ++j) {
+            sum += key_ptr[j * dim + d];
+        }
+        repre_ptr[d] = sum / block_size;
+    }
+}
+
+__global__ void retrieval_kernel(float **Q, const float *__restrict__ K, float *__restrict__ score, const int *__restrict__ block_table, const int *__restrict__ batch_index, int dim, int S){
+    // Q: [batch, dim], the query tensors
+    // K: [N, dim], the key tensors
+    // score: [S], the result score values
+    // block_table: [S], the index for K. It's a flattened tensors which actually compose `batch` segment: [N1, N2, N3] for batch = 3, N1 + N2 + N3 = S
+    // batch_index: [S], the mark specifying which batch current index belongs to and which Q current K[index] should be compared with.
+    // dim: feature size
+    extern __shared__ float local_score[]; // num of threads
+    int global_x = blockIdx.x;
+    int local_x = threadIdx.x;
+    if (global_x < S){
+        const float *q = Q[batch_index[global_x]];
+        const float *k = K + block_table[global_x] * dim;
+        int num_tiles = (dim + 4 * blockDim.x - 1) / (4 * blockDim.x);
+        float sum = 0.0f;
+        for(int i = 0; i < num_tiles; ++i){
+            int tile_offset = i * (4 * blockDim.x);
+            if(tile_offset + local_x * 4 + 4 <= dim){
+                const float4 *q4 = reinterpret_cast<const float4*>(q + tile_offset + local_x * 4);
+                const float4 *k4 = reinterpret_cast<const float4*>(k + tile_offset + local_x * 4);
+                sum += q4->x * k4->x + q4->y * k4->y + q4->z * k4->z + q4->w * k4->w;
+            }
+        }
+        local_score[local_x] = sum;
+        __syncthreads();
+        for(int i = blockDim.x / 2; i; i = i / 2){
+            if(local_x < i){
+                local_score[local_x] = local_score[local_x] + local_score[local_x + i];
+            }
+            __syncthreads();
+        }
+        score[global_x] = local_score[0];
+    }
+}
+
+void esa_repre(torch::Tensor key_cache, torch::Tensor repre_cache, torch::Tensor block_table, torch::Tensor repre_table){
+    int block_size = key_cache.size(1);
+    int dim = repre_cache.size(-1);
+    printf("block_size: %d, dim: %d\n", block_size, dim);
+    int threads = dim;
+    int blocks = block_table.size(0);
+    extract_repre<<<blocks, threads>>>(key_cache.data_ptr<float>(), repre_cache.data_ptr<float>(), block_table.data_ptr<int>(), repre_table.data_ptr<int>(), block_size, dim);
+}
+
+void esa_retrieval(const std::vector<torch::Tensor> &query_list, torch::Tensor repre_cache, torch::Tensor q_index, torch::Tensor repre_index, torch::Tensor score){
+    // query: a list of ptr
+    // repre_cache: a ptr
+    // CHECK_TORCH_TENSOR_DTYPE(query_list[0], torch::kFloat32);
+    // CHECK_TORCH_TENSOR_DTYPE(repre_cache, torch::kFloat32);
+    int s = q_index.size(0);
+    int dim = repre_cache.size(1);
+    int batch = query_list.size();
+    dim3 numThreads = {(unsigned int)(32)};
+    dim3 numBlocks = {(unsigned int) s};
+    size_t bytes = numThreads.x * sizeof(float);
+
+
+    // method 1: use cudaMallocManaged to allocate unified_memory, this perform really good
+    float** Q_ptrs = nullptr;
+    cudaMallocManaged(&Q_ptrs, batch * sizeof(float*));
+    for(int i = 0; i < batch; ++i) {
+        Q_ptrs[i] = query_list[i].data_ptr<float>();
+    }
+
+    // method 2: copy pointers from host to device, this will spent more time
+    // std::vector<float*> h_Q_ptrs(batch);
+    // for(int i = 0; i < batch; ++i) {
+    //     h_Q_ptrs[i] = query_list[i].data_ptr<float>();
+    // }
+    // float **Q_ptrs;
+    // cuda_check(cudaMalloc(&Q_ptrs, batch * sizeof(float*)));
+    // cuda_check(cudaMemcpy(Q_ptrs, h_Q_ptrs.data(), batch * sizeof(float*), cudaMemcpyHostToDevice));
+
+    retrieval_kernel<<<numBlocks, numThreads, bytes>>>(Q_ptrs, repre_cache.data_ptr<float>(), score.data_ptr<float>(), repre_index.data_ptr<int>(), q_index.data_ptr<int>(), dim, s);
+    cuda_check(cudaFree(Q_ptrs));
+}
+
+void esa_topk(torch::Tensor score, torch::Tensor index, torch::Tensor offsets, torch::Tensor score_out, torch::Tensor index_out, size_t K){
+    CHECK_TORCH_TENSOR_DTYPE(offsets, torch::kInt32);
+    void*  d_temp = nullptr;
+    size_t temp_bytes = 0;
+    size_t B = offsets.size(0) - 1;
+    size_t total = score.size(0);
+    cub::DeviceSegmentedRadixSort::SortPairsDescending(
+        d_temp, temp_bytes,
+        score.data_ptr<float>(),  score_out.data_ptr<float>(),
+        index.data_ptr<int>(), index_out.data_ptr<int>(),
+        total, B, offsets.data_ptr<int>(), offsets.data_ptr<int>() + 1);
+    cuda_check(cudaMalloc(&d_temp, temp_bytes));
+    cub::DeviceSegmentedRadixSort::SortPairsDescending(
+        d_temp, temp_bytes,
+        score.data_ptr<float>(),  score_out.data_ptr<float>(),
+        index.data_ptr<int>(), index_out.data_ptr<int>(),
+        total, B, offsets.data_ptr<int>(), offsets.data_ptr<int>() + 1);
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    TORCH_BINDING_COMMON_EXTENSION(esa_retrieval)
+    TORCH_BINDING_COMMON_EXTENSION(esa_topk)
+    TORCH_BINDING_COMMON_EXTENSION(esa_repre)
+}

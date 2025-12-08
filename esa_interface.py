@@ -7,8 +7,8 @@ torch.set_grad_enabled(False)
 
 # Load the CUDA kernel as a python module
 lib = load(
-    name="retrieval_kernel",
-    sources=["retrieval_kernel.cu"],
+    name="esa_utils",
+    sources=["esa_utils.cu"],
     extra_cuda_cflags=[
         "-O3",
         "-U__CUDA_NO_HALF_OPERATORS__",
@@ -23,6 +23,7 @@ lib = load(
 )
 esa_retrieval = lib.esa_retrieval
 esa_topk = lib.esa_topk
+esa_repre = lib.esa_repre
 
 b = 4
 s = 10
@@ -128,4 +129,23 @@ gt_index = gt_index.view(batch_size, -1)
 print(index_out.shape, gt_index.shape)
 diff = (index_out[:, :topk] - gt_index).abs()
 print("diff: ", diff.max())
-# assert torch.equal(index_out, gt_index)
+
+
+# extract repre
+key_cache = torch.randn(100, 128, 8, 128, dtype=torch.float32).cuda()
+repre_cache = torch.randn(100, 1, 8, 128, dtype=torch.float32).cuda()
+repre_cache2 = torch.randn(100, 1, 8, 128, dtype=torch.float32).cuda()
+block_table = torch.arange(0, 20, 2, dtype=torch.int32).cuda()
+begin = time.time()
+esa_repre(key_cache.view(100, 128, -1), repre_cache.view(100, 1, -1), block_table, block_table)
+torch.cuda.synchronize()
+print("esa_repre spent: ", time.time() - begin)
+
+begin = time.time()
+for blk_id in block_table:
+    repre_cache2[blk_id] = key_cache[blk_id].mean(0)
+torch.cuda.synchronize()
+print("normal mean spent: ", time.time() - begin)
+
+diff = (repre_cache2[block_table] - repre_cache[block_table]).abs()
+print("repre diff: ", diff.max())
