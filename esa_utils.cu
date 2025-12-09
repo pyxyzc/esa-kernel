@@ -24,19 +24,18 @@
     } \
 } \
 
-__global__ void extract_repre(const float *key_cache, float *repre_cache, const int *block_table, const int *block_table_2, int block_size, int dim) {
-    // key_cache: [N, block_size, dim]
-    // repre_cache: [N, 1, dim]
-    // block_table: [S]
-    // repre_cache[block_table[i]] = mean(key_cache[block_table[i]], 0)
-    // NOTE: The last `dimtension` can be processed parallelly. But the
-    // `block_size` dim is correlated with each other.
-    // So blocks (threads) are tiled for blocks (key_cache)
-    // And threads in a block handles different dim
-
+/**
+ * This kernel performs: repre_cache[repre_block_table[i]] = mean( key_cache[key_block_table[i]], 0 )
+ *
+ * @param key_cache: [N, block_size, dim]
+ * @param repre_cache: [N, dim]
+ * @param key_block_table: [S]
+ * @param repre_block_table: [S]
+ */
+__global__ void extract_repre(const float *key_cache, float *repre_cache, const int *key_block_table, const int *repre_block_table, int block_size, int dim) {
     int idx = blockIdx.x;
-    int block_id = block_table[idx];
-    int block_id_2 = block_table_2[idx];
+    int block_id = key_block_table[idx];
+    int block_id_2 = repre_block_table[idx];
     const float* key_ptr = key_cache + block_id * block_size * dim;
     float* repre_ptr = repre_cache + block_id_2 * dim;
     int d = threadIdx.x;
@@ -49,19 +48,22 @@ __global__ void extract_repre(const float *key_cache, float *repre_cache, const 
     }
 }
 
-__global__ void retrieval_kernel(float **Q, const float *__restrict__ K, float *__restrict__ score, const int *__restrict__ block_table, const int *__restrict__ batch_index, int dim, int S){
-    // Q: [batch, dim], the query tensors
-    // K: [N, dim], the key tensors
-    // score: [S], the result score values
-    // block_table: [S], the index for K. It's a flattened tensors which actually compose `batch` segment: [N1, N2, N3] for batch = 3, N1 + N2 + N3 = S
-    // batch_index: [S], the mark specifying which batch current index belongs to and which Q current K[index] should be compared with.
-    // dim: feature size
+/**
+ * This kernel performs: score[i] = queries[batch_index[i]] * repre_cache[block_table[i]]
+ *
+ * @param queries: a list of tensors. { [dim] }
+ * @param repre_cache: [N, dim]
+ * @param score: [S]
+ * @param block_table: [S]
+ * @param batch_index: [S]
+ */
+__global__ void retrieval_kernel(float **queries, const float *__restrict__ repre_cache, float *__restrict__ score, const int *__restrict__ block_table, const int *__restrict__ batch_index, int dim, int S){
     extern __shared__ float local_score[]; // num of threads
     int global_x = blockIdx.x;
     int local_x = threadIdx.x;
     if (global_x < S){
-        const float *q = Q[batch_index[global_x]];
-        const float *k = K + block_table[global_x] * dim;
+        const float *q = queries[batch_index[global_x]];
+        const float *k = repre_cache + block_table[global_x] * dim;
         int num_tiles = (dim + 4 * blockDim.x - 1) / (4 * blockDim.x);
         float sum = 0.0f;
         for(int i = 0; i < num_tiles; ++i){
@@ -87,16 +89,12 @@ __global__ void retrieval_kernel(float **Q, const float *__restrict__ K, float *
 void esa_repre(torch::Tensor key_cache, torch::Tensor repre_cache, torch::Tensor block_table, torch::Tensor repre_table){
     int block_size = key_cache.size(1);
     int dim = repre_cache.size(-1);
-    printf("block_size: %d, dim: %d\n", block_size, dim);
     int threads = dim;
     int blocks = block_table.size(0);
     extract_repre<<<blocks, threads>>>(key_cache.data_ptr<float>(), repre_cache.data_ptr<float>(), block_table.data_ptr<int>(), repre_table.data_ptr<int>(), block_size, dim);
 }
 
 void esa_retrieval(const std::vector<torch::Tensor> &query_list, torch::Tensor repre_cache, torch::Tensor q_index, torch::Tensor repre_index, torch::Tensor score, torch::Tensor score_sorted, torch::Tensor index_ranged, torch::Tensor index_sorted, torch::Tensor batch_offset, torch::Tensor workspace){
-// void esa_retrieval(const std::vector<torch::Tensor> &query_list, torch::Tensor repre_cache, torch::Tensor q_index, torch::Tensor repre_index, torch::Tensor score){
-    // query: a list of ptr
-    // repre_cache: a ptr
     int s = q_index.size(0);
     int dim = repre_cache.size(1);
     int batch = query_list.size();
