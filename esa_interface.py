@@ -144,9 +144,10 @@ print("diff: ", diff.max())
 
 
 # extract repre
-key_cache = torch.randn(100, 128, 8, 128, dtype=torch.float32).cuda()
-repre_cache = torch.randn(100, 1, 8, 128, dtype=torch.float32).cuda()
-repre_cache2 = torch.randn(100, 1, 8, 128, dtype=torch.float32).cuda()
+dtype = torch.bfloat16
+key_cache = torch.randn(100, 128, 8, 128, dtype=dtype).cuda()
+repre_cache = torch.randn(100, 1, 8, 128, dtype=dtype).cuda()
+repre_cache2 = torch.randn(100, 1, 8, 128, dtype=dtype).cuda()
 block_table = torch.arange(0, 20, 2, dtype=torch.int32).cuda()
 begin = time.time()
 esa_repre(key_cache.view(100, 128, -1), repre_cache.view(100, 1, -1), block_table, block_table)

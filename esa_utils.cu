@@ -32,15 +32,16 @@
  * @param key_block_table: [S]
  * @param repre_block_table: [S]
  */
-__global__ void extract_repre(const float *key_cache, float *repre_cache, const int *key_block_table, const int *repre_block_table, int block_size, int dim) {
+template <typename scalar_t>
+__global__ void extract_repre(const scalar_t *key_cache, scalar_t *repre_cache, const int *key_block_table, const int *repre_block_table, int block_size, int dim) {
     int idx = blockIdx.x;
     int block_id = key_block_table[idx];
     int block_id_2 = repre_block_table[idx];
-    const float* key_ptr = key_cache + block_id * block_size * dim;
-    float* repre_ptr = repre_cache + block_id_2 * dim;
+    const scalar_t* key_ptr = key_cache + block_id * block_size * dim;
+    scalar_t* repre_ptr = repre_cache + block_id_2 * dim;
     int d = threadIdx.x;
     if (d < dim) {
-        float sum = 0.0f;
+        scalar_t sum = 0;
         for (int j = 0; j < block_size; ++j) {
             sum += key_ptr[j * dim + d];
         }
@@ -91,7 +92,15 @@ void esa_repre(torch::Tensor key_cache, torch::Tensor repre_cache, torch::Tensor
     int dim = repre_cache.size(-1);
     int threads = dim;
     int blocks = block_table.size(0);
-    extract_repre<<<blocks, threads>>>(key_cache.data_ptr<float>(), repre_cache.data_ptr<float>(), block_table.data_ptr<int>(), repre_table.data_ptr<int>(), block_size, dim);
+    AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16, key_cache.scalar_type(), "esa_repre_cuda", ([&] {
+        extract_repre<scalar_t><<<blocks, threads>>>(
+            key_cache.data_ptr<scalar_t>(),
+            repre_cache.data_ptr<scalar_t>(),
+            block_table.data_ptr<int>(),
+            repre_table.data_ptr<int>(),
+            block_size,
+            dim);
+    }));
 }
 
 void esa_retrieval(const std::vector<torch::Tensor> &query_list, torch::Tensor repre_cache, torch::Tensor q_index, torch::Tensor repre_index, torch::Tensor score, torch::Tensor score_sorted, torch::Tensor index_ranged, torch::Tensor index_sorted, torch::Tensor batch_offset, torch::Tensor workspace){
