@@ -18,3 +18,4 @@ test_cpu_overhead
 test_cpu_overhead.nsys-rep
 test_cpu_overhead_kernel.nsys-rep
 test_cpu_overhead_memcpy.nsys-rep
+__pycache__

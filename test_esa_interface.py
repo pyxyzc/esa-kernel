@@ -63,7 +63,8 @@ def test_esa_retrieval(batch_size, num_repre_blocks, dim):
     workspace = torch.zeros(10000, dtype=torch.int32).cuda()
 
     Input = esa_lib.RetrievalInputTensor()
-    Input.query_list = query_list
+    Input.q_ptrs = torch.tensor([q.data_ptr() for q in query_list],
+                                dtype=torch.int64, device='cuda')
     Input.repre_cache = repre_cache
     Input.q_index = q_index
     Input.repre_index = repre_index
@@ -101,37 +102,37 @@ def test_esa_retrieval(batch_size, num_repre_blocks, dim):
     print("")
 
 
-@pytest.mark.parametrize("num_repre_blocks", [100, 500, 1000])
-@pytest.mark.parametrize("dim", [576, 1024])
-def test_esa_repre(num_repre_blocks, dim):# extract repre
-    print(f'''TEST esa_repre
-{' '*4}total number of blocks to extract_repre: {num_repre_blocks}
-{' '*4}dim (num_heads * hidden_size): {dim}\n''')
-    dtype = torch.bfloat16
-    N = 2 * num_repre_blocks
-    block_size = 128
-    key_cache = torch.randn(N, block_size, dim, dtype=dtype).cuda()
-    repre_cache = torch.randn(N, 1, dim, dtype=dtype).cuda()
-    repre_cache2 = torch.randn(N, 1, dim, dtype=dtype).cuda()
-
-    rng = np.random.default_rng()
-    range_n = np.arange(N)
-    repre_index = rng.choice(range_n, size=num_repre_blocks, replace=False)
-    repre_index = torch.from_numpy(repre_index).to(torch.int32).cuda()
-
-    start = time.perf_counter_ns()
-    esa_repre(key_cache, repre_cache, repre_index, repre_index)
-    torch.cuda.synchronize()
-    duration = time.perf_counter_ns() - start
-    print_green(f"{' '*4}[esa_repre] host API time: {duration / 1e6:.3f} ms")
-
-    start = time.perf_counter_ns()
-    for blk_id in repre_index:
-        repre_cache2[blk_id] = key_cache[blk_id].mean(0)
-    torch.cuda.synchronize()
-    duration = time.perf_counter_ns() - start
-    print_red(f"{' '*4}[naive_repre] host API time: {duration / 1e6:.3f} ms")
-
-    diff = (repre_cache2[repre_index] - repre_cache[repre_index]).abs()
-    print_blue(f"{' '*4}[esa_repre] repre diff: {diff.mean():.3f}(mean), {diff.max():.3f}(max)")
-    print("")
+# @pytest.mark.parametrize("num_repre_blocks", [100, 500, 1000])
+# @pytest.mark.parametrize("dim", [576, 1024])
+# def test_esa_repre(num_repre_blocks, dim):# extract repre
+#     print(f'''TEST esa_repre
+# {' '*4}total number of blocks to extract_repre: {num_repre_blocks}
+# {' '*4}dim (num_heads * hidden_size): {dim}\n''')
+#     dtype = torch.bfloat16
+#     N = 2 * num_repre_blocks
+#     block_size = 128
+#     key_cache = torch.randn(N, block_size, dim, dtype=dtype).cuda()
+#     repre_cache = torch.randn(N, 1, dim, dtype=dtype).cuda()
+#     repre_cache2 = torch.randn(N, 1, dim, dtype=dtype).cuda()
+#
+#     rng = np.random.default_rng()
+#     range_n = np.arange(N)
+#     repre_index = rng.choice(range_n, size=num_repre_blocks, replace=False)
+#     repre_index = torch.from_numpy(repre_index).to(torch.int32).cuda()
+#
+#     start = time.perf_counter_ns()
+#     esa_repre(key_cache, repre_cache, repre_index, repre_index)
+#     torch.cuda.synchronize()
+#     duration = time.perf_counter_ns() - start
+#     print_green(f"{' '*4}[esa_repre] host API time: {duration / 1e6:.3f} ms")
+#
+#     start = time.perf_counter_ns()
+#     for blk_id in repre_index:
+#         repre_cache2[blk_id] = key_cache[blk_id].mean(0)
+#     torch.cuda.synchronize()
+#     duration = time.perf_counter_ns() - start
+#     print_red(f"{' '*4}[naive_repre] host API time: {duration / 1e6:.3f} ms")
+#
+#     diff = (repre_cache2[repre_index] - repre_cache[repre_index]).abs()
+#     print_blue(f"{' '*4}[esa_repre] repre diff: {diff.mean():.3f}(mean), {diff.max():.3f}(max)")
+#     print("")

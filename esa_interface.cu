@@ -18,11 +18,11 @@ void esa_repre(torch::Tensor key_cache, torch::Tensor repre_cache, torch::Tensor
 }
 
 struct RetrievalInputTensor{
-    py::list query_list;
     torch::Tensor repre_cache;
     torch::Tensor q_index;
     torch::Tensor repre_index;
     torch::Tensor batch_offset;
+    torch::Tensor q_ptrs;
     torch::Tensor workspace;
 };
 
@@ -34,7 +34,7 @@ struct RetrievalOutputTensor{
 };
 
 void esa_retrieval(RetrievalInputTensor input, RetrievalOutputTensor output){
-    auto query_list = input.query_list;
+    auto q_ptrs = input.q_ptrs;
     auto repre_cache = input.repre_cache;
     auto q_index = input.q_index;
     auto repre_index = input.repre_index;
@@ -48,21 +48,15 @@ void esa_retrieval(RetrievalInputTensor input, RetrievalOutputTensor output){
 
     int s = q_index.size(0);
     int dim = repre_cache.size(1);
-    int batch = query_list.size();
+    int batch = q_ptrs.size(0);
     dim3 numThreads = {(unsigned int)(32)};
     dim3 numBlocks = {(unsigned int)(s)};
 
     AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, repre_cache.scalar_type(), "esa_retrieval_cuda", [&]{
         if constexpr (std::is_same_v<scalar_t, float>) {
-            float** Q_ptrs = nullptr;
-            cudaMallocManaged(&Q_ptrs, batch * sizeof(float*));
-            for(int i = 0; i < batch; ++i) {
-                auto q_tensor = query_list[i].cast<torch::Tensor>();
-                Q_ptrs[i] = q_tensor.data_ptr<float>();
-            }
+            float** Q_ptrs = reinterpret_cast<float**>(input.q_ptrs.data_ptr<int64_t>());
             size_t bytes = numThreads.x * sizeof(float);
             retrieval_kernel_fp32<<<numBlocks, numThreads, bytes>>>(Q_ptrs, repre_cache.data_ptr<float>(), score.data_ptr<float>(), repre_index.data_ptr<int>(), q_index.data_ptr<int>(), dim, s);
-            CUDA_CHECK(cudaFree(Q_ptrs));
             void* temp_workspace = nullptr;
             size_t temp_bytes = 0;
             cub::DeviceSegmentedRadixSort::SortPairsDescending(
@@ -77,12 +71,7 @@ void esa_retrieval(RetrievalInputTensor input, RetrievalOutputTensor output){
                     index_ranged.data_ptr<int>(), index_sorted.data_ptr<int>(),
                     s, batch, batch_offset.data_ptr<int>(), batch_offset.data_ptr<int>() + 1);
         } else if constexpr (std::is_same_v<scalar_t, at::Half>) {
-            __half** Q_ptrs = nullptr;
-            cudaMallocManaged(&Q_ptrs, batch * sizeof(__half*));
-            for(int i = 0; i < batch; ++i) {
-                auto q_tensor = query_list[i].cast<torch::Tensor>();
-                Q_ptrs[i] = reinterpret_cast<__half*>(q_tensor.data_ptr());
-            }
+            __half** Q_ptrs = reinterpret_cast<__half**>(input.q_ptrs.data_ptr<int64_t>());
             size_t bytes = numThreads.x * sizeof(float);
             retrieval_kernel_fp16<<<numBlocks, numThreads, bytes>>>(Q_ptrs,
                     reinterpret_cast<__half*>(repre_cache.data_ptr()),
@@ -90,7 +79,6 @@ void esa_retrieval(RetrievalInputTensor input, RetrievalOutputTensor output){
                     reinterpret_cast<int*>(repre_index.data_ptr()),
                     reinterpret_cast<int*>(q_index.data_ptr()),
                     dim, s);
-            CUDA_CHECK(cudaFree(Q_ptrs));
             void* temp_workspace = nullptr;
             size_t temp_bytes = 0;
             cub::DeviceSegmentedRadixSort::SortPairsDescending(
@@ -107,12 +95,7 @@ void esa_retrieval(RetrievalInputTensor input, RetrievalOutputTensor output){
                     index_ranged.data_ptr<int>(), index_sorted.data_ptr<int>(),
                     s, batch, batch_offset.data_ptr<int>(), batch_offset.data_ptr<int>() + 1);
         } else if constexpr (std::is_same_v<scalar_t, at::BFloat16>) {
-            __nv_bfloat16** Q_ptrs = nullptr;
-            cudaMallocManaged(&Q_ptrs, batch * sizeof(__nv_bfloat16*));
-            for(int i = 0; i < batch; ++i) {
-                auto q_tensor = query_list[i].cast<torch::Tensor>();
-                Q_ptrs[i] = reinterpret_cast<__nv_bfloat16*>(q_tensor.data_ptr());
-            }
+            __nv_bfloat16** Q_ptrs = reinterpret_cast<__nv_bfloat16**>(input.q_ptrs.data_ptr<int64_t>());
             size_t bytes = numThreads.x * sizeof(float);
             retrieval_kernel_bf16<<<numBlocks, numThreads, bytes>>>(Q_ptrs,
                     reinterpret_cast<__nv_bfloat16*>(repre_cache.data_ptr()),
@@ -120,7 +103,6 @@ void esa_retrieval(RetrievalInputTensor input, RetrievalOutputTensor output){
                     reinterpret_cast<int*>(repre_index.data_ptr()),
                     reinterpret_cast<int*>(q_index.data_ptr()),
                     dim, s);
-            CUDA_CHECK(cudaFree(Q_ptrs));
             void* temp_workspace = nullptr;
             size_t temp_bytes = 0;
             cub::DeviceSegmentedRadixSort::SortPairsDescending(
@@ -165,11 +147,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "ESA cuda kernels for block feature extraction and block retrieval";
     py::class_<RetrievalInputTensor>(m, "RetrievalInputTensor")
         .def(py::init<>())
-        .def_readwrite("query_list", &RetrievalInputTensor::query_list)
         .def_readwrite("repre_cache", &RetrievalInputTensor::repre_cache)
         .def_readwrite("q_index", &RetrievalInputTensor::q_index)
         .def_readwrite("repre_index", &RetrievalInputTensor::repre_index)
         .def_readwrite("batch_offset", &RetrievalInputTensor::batch_offset)
+        .def_readwrite("q_ptrs", &RetrievalInputTensor::q_ptrs)
         .def_readwrite("workspace", &RetrievalInputTensor::workspace);
 
     py::class_<RetrievalOutputTensor>(m, "RetrievalOutputTensor")
