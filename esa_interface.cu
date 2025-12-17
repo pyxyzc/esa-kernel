@@ -163,7 +163,7 @@ void esa_retrieval(RetrievalInputTensor input, RetrievalOutputTensor output){
     size_t bytes = numWarps * sizeof(float);
     AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16, repre_cache.scalar_type(), "esa_retrieval_cuda", ([&] {
         auto* Q_ptrs = reinterpret_cast<scalar_t**>(q_ptrs.data_ptr<int64_t>());
-        retrieval_kernel<<<numBlocks, numThreads, bytes>>>(Q_ptrs, repre_cache.data_ptr<scalar_t>(), score.data_ptr<scalar_t>(), repre_index.data_ptr<int>(), q_index.data_ptr<int>(), num_q_heads, num_k_heads, dim, s);
+        retrieval_kernel<<<numBlocks, numThreads, bytes>>>(Q_ptrs, reinterpret_cast<scalar_t*>(repre_cache.data_ptr()), reinterpret_cast<scalar_t*>(score.data_ptr()), repre_index.data_ptr<int>(), q_index.data_ptr<int>(), num_q_heads, num_k_heads, dim, s);
     }));
 }
 
