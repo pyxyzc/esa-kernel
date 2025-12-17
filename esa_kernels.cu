@@ -36,7 +36,7 @@ __global__ void extract_repre(const scalar_t *key_cache, scalar_t *repre_cache, 
  */
 
 template <typename scalar_t>
-__global__ void retrieval_kernel_fp32(scalar_t **queries, scalar_t *__restrict__ repre_cache, scalar_t *__restrict__ score, int *__restrict__ block_table, int *__restrict__ batch_index, int num_q_heads, int num_k_heads, int dim, int S){
+__global__ void retrieval_kernel(scalar_t **queries, scalar_t *__restrict__ repre_cache, scalar_t *__restrict__ score, int *__restrict__ block_table, int *__restrict__ batch_index, int num_q_heads, int num_k_heads, int dim, int S){
     if (blockIdx.x >= S){
         return;
     }
@@ -79,74 +79,4 @@ __global__ void retrieval_kernel_fp32(scalar_t **queries, scalar_t *__restrict__
             score[blockIdx.x] = static_cast<scalar_t>(sum);
         }
     }
-}
-
-__global__ void retrieval_kernel_fp16(__half **queries, __half *__restrict__ repre_cache, __half *__restrict__ score, int *__restrict__ block_table, int *__restrict__ batch_index, int dim, int S){
-    extern __shared__ float local_score_fp16[]; // num of threads
-    int global_x = blockIdx.x;
-    int local_x = threadIdx.x;
-    if (global_x < S){
-        const __half *q = queries[batch_index[global_x]];
-        const __half *k = repre_cache + block_table[global_x] * dim;
-        int num_tiles = (dim + 2 * blockDim.x - 1) / (2 * blockDim.x);
-        float sum = 0.0f;
-        for(int i = 0; i < num_tiles; ++i){
-            int tile_offset = i * (2 * blockDim.x);
-            int idx = tile_offset + local_x * 2;
-            if(idx + 2 <= dim){
-                __half2 q2 = *reinterpret_cast<const __half2*>(q + idx);
-                __half2 k2 = *reinterpret_cast<const __half2*>(k + idx);
-                __half2 p = __hmul2(q2, k2);
-                sum += __half2float(p.x) + __half2float(p.y);
-            }
-        }
-        local_score_fp16[local_x] = sum;
-        __syncthreads();
-        for(int i = blockDim.x / 2; i; i = i / 2){
-            if(local_x < i){
-                local_score_fp16[local_x] += local_score_fp16[local_x + i];
-            }
-            __syncthreads();
-        }
-        if (local_x == 0) score[global_x] = __float2half(local_score_fp16[0]);
-    }
-}
-
-__global__ void retrieval_kernel_bf16(__nv_bfloat16** queries, __nv_bfloat16* __restrict__ repre_cache, __nv_bfloat16*  __restrict__ score, int* __restrict__ block_table, int* __restrict__ batch_index, int dim, int S){
-    extern __shared__ float local_score_bf16[];
-    int global_x = blockIdx.x;
-    int local_x  = threadIdx.x;
-    if (global_x >= S) return;
-    const __nv_bfloat16* q = queries[batch_index[global_x]];
-    const __nv_bfloat16* k = repre_cache + block_table[global_x] * dim;
-    int num_tiles = (dim + 2 * blockDim.x - 1) / (2 * blockDim.x);
-    float sum = 0.0f;
-    for (int i = 0; i < num_tiles; ++i) {
-        int idx = i * (2 * blockDim.x) + local_x * 2;
-        if (idx + 2 <= dim) {
-            uint4 tmp   = *reinterpret_cast<const uint4*>(q + idx);
-            uint2 q2u   = make_uint2(tmp.x, tmp.y);      // 前 4 个 bf16
-            tmp         = *reinterpret_cast<const uint4*>(k + idx);
-            uint2 k2u   = make_uint2(tmp.x, tmp.y);
-            __nv_bfloat162 q2, k2;
-            asm volatile("mov.b32 {%0, %1}, %2;"
-                    : "=h"(*reinterpret_cast<uint16_t*>(&q2.x)),
-                    "=h"(*reinterpret_cast<uint16_t*>(&q2.y))
-                    : "r"(q2u.x));
-            asm volatile("mov.b32 {%0, %1}, %2;"
-                    : "=h"(*reinterpret_cast<uint16_t*>(&k2.x)),
-                    "=h"(*reinterpret_cast<uint16_t*>(&k2.y))
-                    : "r"(k2u.x));
-            __nv_bfloat162 p = __hmul2(q2, k2);
-            sum += __bfloat162float(p.x) + __bfloat162float(p.y);
-        }
-    }
-    local_score_bf16[local_x] = sum;
-    __syncthreads();
-    for (int i = blockDim.x / 2; i > 0; i >>= 1) {
-        if (local_x < i)
-            local_score_bf16[local_x] += local_score_bf16[local_x + i];
-        __syncthreads();
-    }
-    if (local_x == 0) score[global_x] = __float2bfloat16(local_score_bf16[0]);
 }
