@@ -6,13 +6,13 @@ static float** cached_d_ptrs = nullptr;
 static int    cached_batch  = 0;
 static std::vector<float*> cached_host_ptrs = {};
 
-__global__ void add_kernel(float* in, float* out, int n, int batch)
+__global__ void add_kernel(float** in, float* out, int n, int batch)
 {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x; 
-    if(tid < n){
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid < n) {
         float sum = 0.0f;
-        for(int i = 0; i < batch; ++i){
-            sum += in[tid];
+        for (int i = 0; i < batch; ++i) {
+            sum += in[i][tid];
         }
         out[tid] = sum;
     }
@@ -42,7 +42,12 @@ void launch(const std::vector<torch::Tensor>& in_tensors, torch::Tensor out)
     //     cached_batch = batch;
     //     cached_host_ptrs = ptrs;
     // }
-    add_kernel<<<numBlocks, numThreads>>>(in_tensors[0].data_ptr<float>(), out.data_ptr<float>(), n, batch);
+    // prepare device pointer array for all input tensors
+    float** d_ptrs;
+    cudaMalloc((void**)&d_ptrs, batch * sizeof(float*));
+    cudaMemcpy(d_ptrs, ptrs.data(), batch * sizeof(float*), cudaMemcpyHostToDevice);
+    add_kernel<<<numBlocks, numThreads>>>(d_ptrs, out.data_ptr<float>(), n, batch);
+    cudaFree(d_ptrs);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
