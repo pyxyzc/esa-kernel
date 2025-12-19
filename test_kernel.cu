@@ -19,7 +19,7 @@ __global__ void add_kernel(float** in, float* out, int n, int batch)
 }
 
 
-void launch(std::vector<torch::Tensor> in_tensors, torch::Tensor out)
+void launch(const std::vector<torch::Tensor>& in_tensors, torch::Tensor out)
 {
     int n = in_tensors[0].numel();
     int batch = in_tensors.size();
@@ -30,11 +30,14 @@ void launch(std::vector<torch::Tensor> in_tensors, torch::Tensor out)
     dim3 numThreads = {1024};
     dim3 numBlocks = {(size_t)((n + 1024 - 1) / 1024)};
     printf("%d %d\n", n, batch);
-    // reuse or initialize cached device pointer array
+    // reuse or initialize cached device pointer array via managed memory
     if (cached_batch != batch || ptrs != cached_host_ptrs) {
         if (cached_d_ptrs) cudaFree(cached_d_ptrs);
-        cudaMalloc((void**)&cached_d_ptrs, batch * sizeof(float*));
-        cudaMemcpy(cached_d_ptrs, ptrs.data(), batch * sizeof(float*), cudaMemcpyHostToDevice);
+        cudaMallocManaged((void**)&cached_d_ptrs, batch * sizeof(float*));
+        for (int i = 0; i < batch; ++i) {
+            cached_d_ptrs[i] = ptrs[i];
+        }
+        cudaDeviceSynchronize(); // ensure pointers are updated on device
         cached_batch = batch;
         cached_host_ptrs = ptrs;
     }
