@@ -1,4 +1,5 @@
 #include "esa_kernels.cu"
+#include "cuda_sm_copy.cu"
 
 void esa_repre(torch::Tensor key_cache, torch::Tensor repre_cache, torch::Tensor block_table, torch::Tensor repre_table){
     int block_size = key_cache.size(1);
@@ -24,6 +25,7 @@ struct RetrievalInputTensor{
     torch::Tensor q_ptrs;
     torch::Tensor workspace;
     int num_q_heads;
+    int batch_size;
 };
 
 struct RetrievalOutputTensor{
@@ -71,7 +73,7 @@ void esa_retrieval(RetrievalInputTensor input, RetrievalOutputTensor output){
     int s = repre_index.size(0);
     auto num_k_heads = repre_cache.size(1);
     int dim = repre_cache.size(2);
-    int batch = q_ptrs.size(0);
+    int batch = input.batch_size;
     printf("blocks: %d, num_k_heads: %d, num_q_heads: %d, batch: %d, dim: %d\n", s, num_k_heads, num_q_heads, batch, dim);
 
     dim3 numBlocks = {(unsigned int)(s)};
@@ -135,6 +137,30 @@ void esa_retrieval(RetrievalInputTensor input, RetrievalOutputTensor output){
     }));
 }
 
+// void esa_copy(void* src[], void* dst[], size_t size, size_t number)
+// {
+//     CudaCopyKernel<<<CUDA_TRANS_BLOCK_NUMBER, CUDA_TRANS_BLOCK_SIZE>>>(
+//         (const void**)src, dst, size, number);
+// }
+//
+// void esa_copy(void* src[], void* dst, size_t size, size_t number)
+// {
+//     CudaCopyKernel<<<CUDA_TRANS_BLOCK_NUMBER, CUDA_TRANS_BLOCK_SIZE>>>(
+//         (const void**)src, dst, size, number);
+// }
+//
+// void esa_copy(void* src, void* dst[], size_t size, size_t number)
+// {
+//     CudaCopyKernel<<<CUDA_TRANS_BLOCK_NUMBER, CUDA_TRANS_BLOCK_SIZE>>>(
+//         (const void*)src, dst, size, number);
+// }
+
+void esa_copy(torch::Tensor src, torch::Tensor dst, size_t size)
+{
+    CudaCopyKernel<<<CUDA_TRANS_BLOCK_NUMBER, CUDA_TRANS_BLOCK_SIZE>>>(
+        (const void*)src.data_ptr(), (void*)dst.data_ptr(), size);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "ESA cuda kernels for block feature extraction and block retrieval";
     py::class_<RetrievalInputTensor>(m, "RetrievalInputTensor")
@@ -142,6 +168,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("repre_cache", &RetrievalInputTensor::repre_cache)
         .def_readwrite("q_index", &RetrievalInputTensor::q_index)
         .def_readwrite("num_q_heads", &RetrievalInputTensor::num_q_heads)
+        .def_readwrite("batch_size", &RetrievalInputTensor::batch_size)
         .def_readwrite("repre_index", &RetrievalInputTensor::repre_index)
         .def_readwrite("batch_offset", &RetrievalInputTensor::batch_offset)
         .def_readwrite("q_ptrs", &RetrievalInputTensor::q_ptrs)
@@ -157,4 +184,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     TORCH_BINDING_COMMON_EXTENSION(esa_retrieval);
     TORCH_BINDING_COMMON_EXTENSION(esa_topk);
     TORCH_BINDING_COMMON_EXTENSION(esa_repre);
+    TORCH_BINDING_COMMON_EXTENSION(esa_copy);
 }

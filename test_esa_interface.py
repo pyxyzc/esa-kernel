@@ -14,6 +14,7 @@ esa_lib = load(
 esa_retrieval = esa_lib.esa_retrieval
 esa_topk = esa_lib.esa_topk
 esa_repre = esa_lib.esa_repre
+esa_copy = esa_lib.esa_copy
 
 class style():
     RED = '\033[31m'
@@ -46,7 +47,7 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
     N = num_repre_blocks * 2
     num_k_heads = 8
     query_list = []
-    dtype = torch.bfloat16
+    dtype = torch.float32
     for i in range(batch_size):
         query_list.append(torch.rand(num_q_heads, dim, dtype=dtype).cuda())
     repre_cache = torch.randn(N, num_k_heads, dim, dtype = dtype).cuda()
@@ -63,11 +64,16 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
     batch_offset = torch.arange(0, num_repre_blocks, num_repre_blocks / batch_size, dtype=torch.int32).cuda()
     batch_offset = torch.cat([batch_offset, torch.tensor([num_repre_blocks], dtype=torch.int32).cuda()])
     workspace = torch.zeros(10000, dtype=torch.int32).cuda()
+    ptrs_host = torch.tensor([q.data_ptr() for q in query_list],
+                             dtype=torch.int64, pin_memory=True)
+    ptrs_dev = torch.zeros(batch_size, dtype=torch.int64, device="cuda")
+    size = ptrs_host.numel() * ptrs_host.element_size()
+    esa_copy(ptrs_host, ptrs_dev, size)
 
     Input = esa_lib.RetrievalInputTensor()
     Input.num_q_heads = num_q_heads;
-    Input.q_ptrs = torch.tensor([q.data_ptr() for q in query_list],
-                                dtype=torch.int64, device='cuda')
+    Input.batch_size = batch_size;
+    Input.q_ptrs = ptrs_dev
     Input.repre_cache = repre_cache
     Input.q_index = q_index
     Input.repre_index = repre_index
@@ -105,10 +111,11 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
     # print_blue(f"{' '*4}score diff: {diff.mean():.3f}(mean), {diff.max():.3f}(max)")
     print(f"score: {score}")
     print(f"score_gt: {score_gt}")
-    diff_index = (index_sorted - index_gt).abs().to(torch.float32)
-    # print_blue(f"{' '*4}index diff: {diff_index.mean():.3f}(mean), {diff_index.max():.3f}(max)")
+    print(f"score diff: {diff.mean()}, {diff.max()}")
+    diff_index = (index_sorted - index_gt).abs()
     print(f"index: {index_sorted}")
     print(f"index_gt: {index_gt}")
+    print_blue(f"{' '*4}index diff: {diff_index}")
     print("")
 
 
@@ -146,5 +153,31 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
 #     diff = (repre_cache2[repre_index] - repre_cache[repre_index]).abs()
 #     print_blue(f"{' '*4}[esa_repre] repre diff: {diff.mean():.3f}(mean), {diff.max():.3f}(max)")
 #     print("")
+
+
 if __name__ == "__main__":
-    test_esa_retrieval(1, 100, 40)
+    test_esa_retrieval(10, 52, 40)
+    # a = torch.randn(1000, 1000, dtype=torch.float32, device="cuda")
+    # b = torch.randn(1000, 1000, dtype=torch.float32, device="cuda")
+    # c = torch.randn(1000, 1000, dtype=torch.float32, device="cuda")
+    # host = torch.randn(100, 128, 128, pin_memory=True, device="cpu", dtype=torch.float32)
+    # dev = torch.zeros(100, 128, 128, device="cuda", dtype=torch.float32)
+    # size = host.numel() * host.element_size()
+    # ptr1 = torch.tensor([host.data_ptr() for _ in range(4)], device="cpu",
+    #                     dtype=torch.uint64, pin_memory=True)
+    # ptr2 = torch.zeros(4, device="cuda", dtype=torch.uint64)
+    # size1 = ptr1.numel() * ptr1.element_size()
+    # size2 = ptr2.numel() * ptr2.element_size()
+    # print("sizes: ", size1, size2)
+    # esa_copy(ptr1, ptr2, size1)
+    # print("ptr1: ",ptr1)
+    # print("ptr2: ",ptr2)
+
+    # for i in range(10):
+    #     esa_copy(host, dev, size)
+    #     c = torch.matmul(a, b)
+    # with torch.cuda.nvtx.range(f"beginGGG"):
+    #     for i in range(100):
+    #         esa_copy(host, dev, size)
+    #         c = torch.matmul(a, b)
+    #     torch.cuda.synchronize()
