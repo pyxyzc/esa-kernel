@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.18)
 project(esa LANGUAGES CXX CUDA)
 find_package(Python COMPONENTS Interpreter Development REQUIRED)
-find_package(pybind11 REQUIRED)
+find_package(pybind11 CONFIG REQUIRED)
 find_package(Torch REQUIRED)   # provides Torch::torch
 if(DEFINED ENV{MY_INCLUDE_PATH})
     message(STATUS "Adding include path from MY_INCLUDE_PATH: $ENV{MY_INCLUDE_PATH}")
