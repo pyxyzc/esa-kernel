@@ -23,21 +23,55 @@ int ceildiv(int a, int b) {
  * @param key_repre_index: [S]
  * @param repre_repre_index: [S]
  */
-template <typename scalar_t>
-__global__ void extract_repre(const scalar_t *key_cache, scalar_t *repre_cache, const int *key_repre_index, const int *repre_index, int block_size, int dim) {
+__global__ void extract_repre_fp32(const float *key_cache, float *repre_cache, const int *block_table, const int *repre_index, int block_size, int dim, int num_blocks) {
     int idx = blockIdx.x;
-    int block_id = key_repre_index[idx];
-    int block_id_2 = repre_index[idx];
-    const scalar_t* key_ptr = key_cache + block_id * block_size * dim;
-    scalar_t* repre_ptr = repre_cache + block_id_2 * dim;
     int d = threadIdx.x;
-    if (d < dim) {
-        float sum = 0;
-        for (int j = 0; j < block_size; ++j) {
-            sum += static_cast<float>(key_ptr[j * dim + d]);
-        }
-        repre_ptr[d] = static_cast<scalar_t>(sum / block_size);
+    if (idx >= num_blocks || d >= dim){
+        return;
     }
+    int index1 = block_table[idx];
+    int index2 = repre_index[idx];
+    const float* key_ptr = key_cache + index1 * block_size * dim;
+    float* repre_ptr = repre_cache + index2 * dim;
+    float sum = 0;
+    for (int j = 0; j < block_size; ++j) {
+        sum += key_ptr[j * dim + d];
+    }
+    repre_ptr[d] = sum / block_size;
+}
+
+__global__ void extract_repre_bf16(const __nv_bfloat16 *key_cache, __nv_bfloat16 *repre_cache, const int *block_table, const int *repre_index, int block_size, int dim, int num_blocks) {
+    int idx = blockIdx.x;
+    int d = threadIdx.x;
+    if (idx >= num_blocks || d >= dim){
+        return;
+    }
+    int index1 = block_table[idx];
+    int index2 = repre_index[idx];
+    const __nv_bfloat16* key_ptr = key_cache + index1 * block_size * dim;
+    __nv_bfloat16* repre_ptr = repre_cache + index2 * dim;
+    float sum = 0;
+    for (int j = 0; j < block_size; ++j) {
+        sum += __bfloat162float(key_ptr[j * dim + d]);
+    }
+    repre_ptr[d] = __float2bfloat16(sum / block_size);
+}
+
+__global__ void extract_repre_fp16(const __half *key_cache, __half *repre_cache, const int *block_table, const int *repre_index, int block_size, int dim, int num_blocks) {
+    int idx = blockIdx.x;
+    int d = threadIdx.x;
+    if (idx >= num_blocks || d >= dim){
+        return;
+    }
+    int index1 = block_table[idx];
+    int index2 = repre_index[idx];
+    const __half* key_ptr = key_cache + index1 * block_size * dim;
+    __half* repre_ptr = repre_cache + index2 * dim;
+    float sum = 0;
+    for (int j = 0; j < block_size; ++j) {
+        sum += __half2float(key_ptr[j * dim + d]);
+    }
+    repre_ptr[d] = __float2half(sum / block_size);
 }
 
 /**
@@ -190,17 +224,39 @@ __global__ void retrieval_kernel_bf16(__nv_bfloat16 *__restrict__ queries, __nv_
 extern "C" void esa_repre(torch::Tensor key_cache, torch::Tensor repre_cache, torch::Tensor block_table, torch::Tensor repre_table){
     int block_size = key_cache.size(1);
     int dim = repre_cache.size(-1);
+    int num_blocks = block_table.size(0);
     int threads = dim;
     int blocks = block_table.size(0);
     AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16, key_cache.scalar_type(), "esa_repre_cuda", ([&] {
-                extract_repre<scalar_t><<<blocks, threads>>>(
-                        key_cache.data_ptr<scalar_t>(),
-                        repre_cache.data_ptr<scalar_t>(),
-                        block_table.data_ptr<int>(),
-                        repre_table.data_ptr<int>(),
-                        block_size,
-                        dim);
-                }));
+        if constexpr (std::is_same_v<scalar_t, float>) {
+            extract_repre_fp32<<<blocks, threads>>>(
+                key_cache.data_ptr<float>(),
+                repre_cache.data_ptr<float>(),
+                block_table.data_ptr<int>(),
+                repre_table.data_ptr<int>(),
+                block_size,
+                dim,
+                num_blocks);
+        } else if constexpr (std::is_same_v<scalar_t, at::Half>) {
+            extract_repre_fp16<<<blocks, threads>>>(
+                reinterpret_cast<__half*>(key_cache.data_ptr()),
+                reinterpret_cast<__half*>(repre_cache.data_ptr()),
+                block_table.data_ptr<int>(),
+                repre_table.data_ptr<int>(),
+                block_size,
+                dim,
+                num_blocks);
+        } else if constexpr (std::is_same_v<scalar_t, at::BFloat16>) {
+            extract_repre_bf16<<<blocks, threads>>>(
+                reinterpret_cast<__nv_bfloat16*>(key_cache.data_ptr()),
+                reinterpret_cast<__nv_bfloat16*>(repre_cache.data_ptr()),
+                block_table.data_ptr<int>(),
+                repre_table.data_ptr<int>(),
+                block_size,
+                dim,
+                num_blocks);
+        }
+    }));
 }
 
 extern "C" void esa_topk(torch::Tensor score, torch::Tensor index, torch::Tensor offsets, torch::Tensor score_out, torch::Tensor index_out, torch::Tensor workspace){
