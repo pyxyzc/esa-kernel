@@ -7,6 +7,7 @@ import torch
 import pytest
 import time
 from build_utils import build_shared
+import torch.cuda.nvtx as nvtx
 
 def load_module():
     """
@@ -130,21 +131,19 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
     Input.q_index = q_index
     Input.repre_index = repre_index
     Input.batch_offset = batch_offset
-    Input.workspace = workspace
     Input.batch = batch_size
     Input.s = total_blocks
 
     Output = esa_lib.RetrievalOutputTensor()
     Output.score = score
-    Output.index = repre_index
-    Output.score_sorted = score_sorted
-    Output.index_sorted = index_sorted
     Output.score_cpu = score_cpu
     Output.score_sorted_cpu = score_sorted_cpu
     Output.index_sorted_cpu = index_sorted_cpu
 
     start = time.perf_counter_ns()
-    handle = esa_retrieval(Input, Output)
+    for i in range(10):
+        with nvtx.range(f"retrieval_{i}"):
+            handle = esa_retrieval(Input, Output)
     # Poll asynchronously for CPU argsort completion; do not force device sync
     deadline = time.time() + 30.0
     while time.time() < deadline:
