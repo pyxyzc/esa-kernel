@@ -14,6 +14,15 @@
 #include <vector>
 #include <algorithm>
 
+#ifdef USE_NVTX
+#include <nvToolsExt.h>
+#define NVTX_PUSH(name) nvtxRangePushA(name)
+#define NVTX_POP() nvtxRangePop()
+#else
+#define NVTX_PUSH(name) do{}while(0)
+#define NVTX_POP() do{}while(0)
+#endif
+
 __inline__ __device__ float warpReduceSum(float val)
 {
     int warpSize = 32;
@@ -532,6 +541,7 @@ extern "C" int esa_retrieval_launcher(torch::Tensor query, torch::Tensor repre_c
     // Use current stream for ordering
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
+    NVTX_PUSH("esa_retrieval: kernel");
     AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16, repre_cache.scalar_type(), "esa_retrieval_cuda", ([&] {
         if constexpr (std::is_same_v<scalar_t, float>) {
             retrieval_kernel_fp32<<<numBlocks, numThreads, bytes, stream>>>(
@@ -559,10 +569,13 @@ extern "C" int esa_retrieval_launcher(torch::Tensor query, torch::Tensor repre_c
                 num_q_heads, num_k_heads, dim, s);
         }
     }));
+    NVTX_POP();
 
     // Copy scores to pinned CPU using SM-copy kernel (must use current stream internally)
     size_t score_bytes = static_cast<size_t>(s) * static_cast<size_t>(score.element_size());
+    NVTX_PUSH("esa_retrieval: esa_copy score->cpu");
     esa_copy(score, score_cpu, score_bytes);
+    NVTX_POP();
 
     // Prepare ctx and D2H copies of metadata needed by CPU worker
     auto ctx = std::make_unique<RetrievalCtx>();
@@ -580,10 +593,12 @@ extern "C" int esa_retrieval_launcher(torch::Tensor query, torch::Tensor repre_c
     ctx->repre_index_cpu = torch::empty({s}, options_cpu_i32);
 
     // Async D2H for offsets and repre_index on the same compute stream
+    NVTX_PUSH("esa_retrieval: D2H metadata");
     cudaMemcpyAsync(ctx->offsets_cpu.data_ptr<int32_t>(), batch_offset.data_ptr<int32_t>(),
                     sizeof(int32_t) * (batch + 1), cudaMemcpyDeviceToHost, stream);
     cudaMemcpyAsync(ctx->repre_index_cpu.data_ptr<int32_t>(), repre_index.data_ptr<int32_t>(),
                     sizeof(int32_t) * s, cudaMemcpyDeviceToHost, stream);
+    NVTX_POP();
 
     int handle;
     {
@@ -593,10 +608,13 @@ extern "C" int esa_retrieval_launcher(torch::Tensor query, torch::Tensor repre_c
     }
 
     // Record event on compute stream after kernel + copies, then trigger host callback on dedicated stream
+    NVTX_PUSH("esa_retrieval: record_event");
     cudaEvent_t ev;
     cudaEventCreateWithFlags(&ev, cudaEventDisableTiming);
     cudaEventRecord(ev, stream);
+    NVTX_POP();
 
+    NVTX_PUSH("esa_retrieval: host_callback_enqueue");
     ensure_cb_stream();
     cudaStreamWaitEvent(g_cb_stream, ev, 0);
 
@@ -607,6 +625,7 @@ extern "C" int esa_retrieval_launcher(torch::Tensor query, torch::Tensor repre_c
         ensure_worker();
         cudaLaunchHostFunc(g_cb_stream, host_cb, ptr.get());
     }
+    NVTX_POP();
 
     // Return immediately; caller can poll for readiness and read CPU outputs
     return handle;

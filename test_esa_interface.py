@@ -27,8 +27,9 @@ def load_module():
             mod = torch_load(
                 name="interface",
                 sources=["esa_interface.cc", "esa_kernels.cu", "esa_sm_copy.cu"],
-                extra_cflags=["-O3", "-std=c++17"],
+                extra_cflags=["-O3", "-std=c++17", "-DUSE_NVTX"],
                 extra_cuda_cflags=["-O3"],
+                extra_ldflags=["-lnvToolsExt"],
                 verbose=True,
             )
             return mod
