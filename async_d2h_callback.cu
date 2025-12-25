@@ -101,8 +101,7 @@ void ensure_worker_started() {
     if (w_started.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
         w_running.store(true, std::memory_order_release);
         w_thread = std::thread(worker_loop);
-        // Detached for simplicity in this demo; process exit will clean it up.
-        w_thread.detach();
+        // Do NOT detach: we'll join it explicitly on shutdown to avoid hangs at process exit.
     }
 }
 
@@ -237,10 +236,23 @@ int pending() {
     return static_cast<int>(g_contexts.size());
 }
 
+void shutdown_worker() {
+    // Idempotent shutdown of the CPU worker thread.
+    if (w_started.load(std::memory_order_acquire)) {
+        w_running.store(false, std::memory_order_release);
+        w_cv.notify_all();
+        if (w_thread.joinable()) {
+            w_thread.join();
+        }
+        w_started.store(false, std::memory_order_release);
+    }
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "Async D2H with CUDA host callback demo";
     m.def("launch_async", &launch_async, "Launch async compute + D2H + host callback (returns handle)");
     m.def("poll", &poll, "Poll for result (ready, min_idx, min_val)");
     m.def("cleanup", &cleanup, "Cleanup a handle");
     m.def("pending", &pending, "Number of pending contexts");
+    m.def("shutdown", &shutdown_worker, "Stop worker thread and join");
 }

@@ -87,5 +87,8 @@ def main():
 
     print(f"All callbacks finished. Collected {len(results)} results.")
 
+    # Cleanly stop the background worker thread in the extension to avoid exit hangs.
+    async_ext.shutdown()
+
 if __name__ == "__main__":
     main()
